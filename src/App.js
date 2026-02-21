@@ -70,6 +70,7 @@ function App() {
       setCurrentView('bind');
       setQrToken(token);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ================= 获取用户资料 =================
