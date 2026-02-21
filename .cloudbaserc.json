@@ -1,0 +1,17 @@
+{
+  "version": "2.0",
+  "envId": "pon-9guy3vvr42152b3d",
+  "framework": {
+    "name": "doctor-platform",
+    "plugins": {
+      "client": {
+        "use": "@cloudbase/framework-plugin-website",
+        "inputs": {
+          "buildCommand": "npm run build",
+          "outputPath": "build",
+          "cloudPath": "/doctor-platform"
+        }
+      }
+    }
+  }
+}
