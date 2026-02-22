@@ -68,8 +68,8 @@ order by tablename, policyname;
 -- 4.1 patients.doctor_id points to non-existing doctor
 select
   p.id as patient_id,
-  p.doctor_id,
-  p.created_at
+  p.name as patient_name,
+  p.doctor_id
 from public.patients p
 left join public.doctors d on d.id = p.doctor_id
 where p.doctor_id is not null
