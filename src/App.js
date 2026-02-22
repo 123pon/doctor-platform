@@ -359,10 +359,15 @@ function App() {
 
       // 优先使用固定配置地址，避免同环境多应用时跳错站点
       const configuredBindBaseUrl = (process.env.REACT_APP_BIND_BASE_URL || '').trim();
+      const appBasePath = (process.env.PUBLIC_URL || '').trim();
       let bindUrl;
 
       if (configuredBindBaseUrl) {
         bindUrl = new URL(configuredBindBaseUrl);
+        // 若仅配置了域名根路径，自动补齐当前应用子路径（如 /doctor-platform）
+        if ((!bindUrl.pathname || bindUrl.pathname === '/') && appBasePath) {
+          bindUrl.pathname = appBasePath.startsWith('/') ? appBasePath : `/${appBasePath}`;
+        }
       } else {
         // 回退到当前页面地址，确保与当前应用保持一致
         bindUrl = new URL(window.location.href);
