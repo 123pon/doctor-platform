@@ -357,9 +357,20 @@ function App() {
 
       if (error) throw error;
 
-      // 生成完整的URL（包含子路径）
-      const baseUrl = window.location.origin + (process.env.PUBLIC_URL || '');
-      const qrContent = `${baseUrl}/?token=${token}`;
+      // 优先使用固定配置地址，避免同环境多应用时跳错站点
+      const configuredBindBaseUrl = (process.env.REACT_APP_BIND_BASE_URL || '').trim();
+      let bindUrl;
+
+      if (configuredBindBaseUrl) {
+        bindUrl = new URL(configuredBindBaseUrl);
+      } else {
+        // 回退到当前页面地址，确保与当前应用保持一致
+        bindUrl = new URL(window.location.href);
+      }
+
+      bindUrl.searchParams.set('token', token);
+      bindUrl.hash = '';
+      const qrContent = bindUrl.toString();
       setQrToken(token);
       setQrExpiry(expiresAt.toLocaleString('zh-CN'));
       setQrCodeUrl(qrContent);

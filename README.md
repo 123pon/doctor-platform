@@ -68,3 +68,22 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+
+## 扫码绑定地址配置（多应用同环境）
+
+如果同一个云环境下同时部署了多个应用（例如 A 和 B），患者端生成的绑定二维码可能跳到错误应用。
+
+可在构建时配置固定地址，让二维码始终指向应用 A：
+
+```bash
+REACT_APP_BIND_BASE_URL=https://你的A应用域名/doctor-platform
+```
+
+说明：
+
+- `REACT_APP_BIND_BASE_URL` 建议填写应用 A 的完整访问前缀（包含子路径，如 `/doctor-platform`）。
+- 未配置时，系统会回退为“当前页面地址 + token 参数”。
+
+## CloudBase 一键执行步骤
+
+完整可执行部署流程见 [CLOUDBASE_DEPLOY_STEPS.md](CLOUDBASE_DEPLOY_STEPS.md)。
