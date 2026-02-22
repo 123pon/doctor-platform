@@ -78,18 +78,21 @@ function App() {
 
     if (!session) {
       setCurrentView('login');
-      setMessage({ type: 'success', text: '检测到绑定二维码，请先登录医生账号后完成绑定。' });
+      setMessage({ type: 'info', text: '🔗 检测到患者绑定请求，请使用医生账号登录完成绑定' });
       return;
     }
 
     if (userRole === 'doctor') {
+      // 医生已登录，直接进入绑定页面
       setCurrentView('bind');
       return;
     }
 
     if (userRole === 'patient') {
       setCurrentView('dashboard');
-      setMessage({ type: 'error', text: '当前账号是患者，无法执行医生绑定操作。' });
+      setMessage({ type: 'error', text: '当前登录的是患者账号，请使用医生账号扫码绑定。' });
+      setQrToken(''); // 清除token
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, [qrToken, session, userRole]);
 
@@ -354,11 +357,13 @@ function App() {
 
       if (error) throw error;
 
-      const qrContent = `${window.location.origin}/?token=${token}`;
+      // 生成完整的URL（包含子路径）
+      const baseUrl = window.location.origin + (process.env.PUBLIC_URL || '');
+      const qrContent = `${baseUrl}/?token=${token}`;
       setQrToken(token);
       setQrExpiry(expiresAt.toLocaleString('zh-CN'));
       setQrCodeUrl(qrContent);
-      setMessage({ type: 'success', text: '二维码生成成功！' });
+      setMessage({ type: 'success', text: '二维码生成成功！医生扫码后需先登录医生账号。' });
     } catch (error) {
       setMessage({ type: 'error', text: '生成二维码失败：' + error.message });
     } finally {
@@ -550,6 +555,13 @@ function App() {
             <form className="auth-form" onSubmit={handleSignIn}>
               <h2>登录账户</h2>
 
+              {qrToken && (
+                <div className="bind-notice">
+                  <p>🔗 您正在完成患者绑定</p>
+                  <p>请使用<strong>医生账号</strong>登录以完成绑定</p>
+                </div>
+              )}
+
               <div className="form-group">
                 <label>邮箱</label>
                 <input
@@ -573,7 +585,7 @@ function App() {
               </div>
 
               <button type="submit" className="auth-button" disabled={loading}>
-                {loading ? '登录中...' : '登录'}
+                {loading ? '登录中...' : qrToken ? '登录并绑定' : '登录'}
               </button>
             </form>
           )}
@@ -593,21 +605,32 @@ function App() {
     return (
       <div className="app">
         <div className="bind-container">
-          <h2>绑定医生</h2>
-          <p>扫描下方二维码完成医生绑定</p>
+          <h2>确认绑定患者</h2>
+          <p>您即将绑定一位患者，绑定后可以查看该患者信息并进行沟通</p>
 
-          <div className="qr-section">
-            <div className="qr-placeholder">
-              <p>二维码已生成，请医生扫描</p>
-              <p>令牌：{qrToken}</p>
+          <div className="bind-info">
+            <div className="info-item">
+              <span className="label">绑定令牌：</span>
+              <span className="value">{qrToken}</span>
+            </div>
+            <div className="info-item">
+              <span className="label">当前医生：</span>
+              <span className="value">{userProfile?.name || session?.user?.email}</span>
             </div>
           </div>
 
           <div className="bind-actions">
             <button onClick={handleBindByToken} className="bind-button" disabled={loading}>
-              {loading ? '绑定中...' : '确认绑定'}
+              {loading ? '绑定中...' : '确认绑定此患者'}
             </button>
-            <button onClick={() => setCurrentView('dashboard')} className="cancel-button">
+            <button 
+              onClick={() => {
+                setCurrentView('dashboard');
+                setQrToken('');
+                window.history.replaceState({}, document.title, window.location.pathname);
+              }} 
+              className="cancel-button"
+            >
               取消
             </button>
           </div>

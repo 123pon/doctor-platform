@@ -1,0 +1,33 @@
+{
+  "$schema": "https://framework-1258016615.tcloudbaseapp.com/schema/latest.json",
+  "version": "2.0",
+  "framework": {
+    "name": "doctor-platform",
+    "plugins": {
+      "client": {
+        "use": "@cloudbase/framework-plugin-website",
+        "inputs": {
+          "buildCommand": "npm run build",
+          "outputPath": "build",
+          "cloudPath": "/doctor-platform",
+          "ignore": [
+            ".git",
+            ".github",
+            "node_modules"
+          ],
+          "headers": [
+            {
+              "source": "**/*",
+              "headers": [
+                {
+                  "key": "Content-Security-Policy",
+                  "value": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; base-uri 'self'; form-action 'self';"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
