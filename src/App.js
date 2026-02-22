@@ -9,6 +9,7 @@ function App() {
   const [session, setSession] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
+  const [doctorProfile, setDoctorProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [currentView, setCurrentView] = useState('dashboard');
 
@@ -67,11 +68,30 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token');
     if (token) {
-      setCurrentView('bind');
       setQrToken(token);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!qrToken) return;
+
+    if (!session) {
+      setCurrentView('login');
+      setMessage({ type: 'success', text: '检测到绑定二维码，请先登录医生账号后完成绑定。' });
+      return;
+    }
+
+    if (userRole === 'doctor') {
+      setCurrentView('bind');
+      return;
+    }
+
+    if (userRole === 'patient') {
+      setCurrentView('dashboard');
+      setMessage({ type: 'error', text: '当前账号是患者，无法执行医生绑定操作。' });
+    }
+  }, [qrToken, session, userRole]);
 
   // ================= 获取用户资料 =================
   const fetchUserProfile = async (userId) => {
@@ -100,6 +120,12 @@ function App() {
       if (!patientError && patient) {
         setUserRole('patient');
         setUserProfile(patient);
+        if (patient.doctor_id) {
+          const doctor = await fetchDoctorInfo(patient.doctor_id);
+          setDoctorProfile(doctor);
+        } else {
+          setDoctorProfile(null);
+        }
         await fetchSubmissions(userId);
         return;
       }
@@ -137,7 +163,7 @@ function App() {
     try {
       const { data, error } = await supabase
         .from('doctors')
-        .select('*')
+        .select('id,name,email,phone')
         .eq('id', doctorId)
         .single();
 
@@ -267,6 +293,7 @@ function App() {
       setSession(null);
       setUserRole(null);
       setUserProfile(null);
+      setDoctorProfile(null);
       setCurrentView('dashboard');
       setFormData({
         email: '',
@@ -362,6 +389,20 @@ function App() {
       }
 
       // 更新患者绑定的医生
+      const { data: patientRecord, error: patientError } = await supabase
+        .from('patients')
+        .select('id,doctor_id')
+        .eq('id', request.patient_id)
+        .single();
+
+      if (patientError || !patientRecord) {
+        throw new Error('患者记录不存在，无法完成绑定');
+      }
+
+      if (patientRecord.doctor_id && patientRecord.doctor_id !== session.user.id) {
+        throw new Error('该患者已绑定其他医生，请先解绑后再重新绑定');
+      }
+
       const { error: updateError } = await supabase
         .from('patients')
         .update({ doctor_id: session.user.id })
@@ -489,13 +530,12 @@ function App() {
 
               {formData.role === 'patient' && (
                 <div className="form-group">
-                  <label>医生邀请码（医生邮箱）</label>
+                  <label>医生邀请码（医生邮箱，可选）</label>
                   <input
                     type="email"
                     placeholder="请输入医生邮箱"
                     value={formData.doctorInviteCode}
                     onChange={(e) => handleInputChange('doctorInviteCode', e.target.value)}
-                    required
                   />
                 </div>
               )}
@@ -660,12 +700,22 @@ function App() {
         {userRole === 'patient' && currentView === 'dashboard' && (
           <div className="dashboard">
             <h2>患者中心</h2>
+            <div className="stats-grid">
+              <div className="stat-card">
+                <h3>绑定状态</h3>
+                <p className="stat-number">{userProfile?.doctor_id ? '已绑定' : '未绑定'}</p>
+              </div>
+              <div className="stat-card">
+                <h3>我的医生</h3>
+                <p className="stat-number">{doctorProfile?.name || '暂无'}</p>
+              </div>
+            </div>
             <div className="quick-actions">
               <button onClick={() => setCurrentView('symptoms')} className="action-button">
                 记录症状
               </button>
               <button onClick={generateBindingQr} className="action-button">
-                绑定医生
+                {userProfile?.doctor_id ? '重新绑定医生' : '绑定医生'}
               </button>
             </div>
 
@@ -791,7 +841,7 @@ function App() {
                 <ChatWindow
                   currentUserId={session.user.id}
                   otherUserId={userProfile.doctor_id}
-                  otherUserName="医生"
+                  otherUserName={doctorProfile?.name || '医生'}
                 />
               </>
             ) : (

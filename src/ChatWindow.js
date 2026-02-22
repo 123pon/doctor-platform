@@ -15,6 +15,13 @@ const ChatWindow = ({ currentUserId, otherUserId, otherUserName }) => {
     return `chat:${ids[0]}:${ids[1]}`;
   };
 
+  const isCurrentChatMessage = (message) => {
+    if (!message) return false;
+    const isSelfToOther = message.sender_id === currentUserId && message.receiver_id === otherUserId;
+    const isOtherToSelf = message.sender_id === otherUserId && message.receiver_id === currentUserId;
+    return isSelfToOther || isOtherToSelf;
+  };
+
   // 加载历史消息
   useEffect(() => {
     loadMessages();
@@ -36,8 +43,7 @@ const ChatWindow = ({ currentUserId, otherUserId, otherUserName }) => {
       const { data, error } = await supabase
         .from('messages')
         .select('*')
-        .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`)
-        .or(`sender_id.eq.${otherUserId},receiver_id.eq.${otherUserId}`)
+        .or(`and(sender_id.eq.${currentUserId},receiver_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},receiver_id.eq.${currentUserId})`)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
@@ -53,23 +59,38 @@ const ChatWindow = ({ currentUserId, otherUserId, otherUserName }) => {
   const setupRealtimeSubscription = () => {
     const channelName = getChatChannelName();
 
-    // 创建私有频道
-    const channel = supabase.channel(channelName, {
-      config: { private: true } // 私有频道需要RLS授权
-    });
+    const channel = supabase.channel(channelName);
 
-    // 监听新消息事件
     channel
-      .on('broadcast', { event: 'message_new' }, (payload) => {
-        // 收到新消息，更新列表
-        const newMsg = payload.payload.new;
-        setMessages(prev => [...prev, newMsg]);
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages'
+      }, (payload) => {
+        const newMsg = payload.new;
+        if (!isCurrentChatMessage(newMsg)) return;
+
+        setMessages(prev => {
+          if (prev.some(msg => msg.id === newMsg.id)) return prev;
+          return [...prev, newMsg];
+        });
         scrollToBottom();
 
-        // 如果当前用户是接收者，标记为已读（可选）
         if (newMsg.receiver_id === currentUserId) {
           markAsRead(newMsg.id);
         }
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages'
+      }, (payload) => {
+        const updatedMsg = payload.new;
+        if (!isCurrentChatMessage(updatedMsg)) return;
+
+        setMessages(prev => prev.map(msg => (
+          msg.id === updatedMsg.id ? { ...msg, is_read: updatedMsg.is_read } : msg
+        )));
       })
       .subscribe((status) => {
         console.log('订阅状态:', status);
@@ -90,12 +111,21 @@ const ChatWindow = ({ currentUserId, otherUserId, otherUserName }) => {
     };
 
     try {
-      // 直接插入数据库，触发器会自动广播
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('messages')
-        .insert([message]);
+        .insert([message])
+        .select('*')
+        .single();
 
       if (error) throw error;
+
+      if (data) {
+        setMessages(prev => {
+          if (prev.some(msg => msg.id === data.id)) return prev;
+          return [...prev, data];
+        });
+        scrollToBottom();
+      }
 
       setNewMessage('');
     } catch (error) {
