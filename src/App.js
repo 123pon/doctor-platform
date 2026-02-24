@@ -319,7 +319,7 @@ function App() {
     try {
       const { data, error } = await supabase
         .from('doctors')
-        .select('id,name,email,phone')
+        .select('id,name,phone')
         .eq('id', doctorId)
         .single();
 
@@ -663,7 +663,6 @@ function App() {
             .insert([{
               id: data.user.id,
               name: formData.name,
-              email: formData.email,
               phone: formData.phone
             }]);
 
@@ -677,11 +676,11 @@ function App() {
             const { data: doctor, error: doctorError } = await supabase
               .from('doctors')
               .select('id')
-              .eq('email', formData.doctorInviteCode)
-              .single();
+              .or(`phone.eq.${formData.doctorInviteCode},name.eq.${formData.doctorInviteCode}`)
+              .maybeSingle();
 
             if (doctorError) throw new Error('查找医生失败：' + doctorError.message);
-            if (!doctor) throw new Error('邀请码无效，找不到对应医生');
+            if (!doctor) throw new Error('邀请码无效，找不到对应医生（可填写医生手机号或姓名）');
             doctorId = doctor.id;
           }
 
@@ -993,10 +992,10 @@ function App() {
 
               {formData.role === 'patient' && (
                 <div className="form-group">
-                  <label>医生邀请码（医生邮箱，可选）</label>
+                  <label>医生邀请码（医生手机号/姓名，可选）</label>
                   <input
-                    type="email"
-                    placeholder="请输入医生邮箱"
+                    type="text"
+                    placeholder="请输入医生手机号或姓名"
                     value={formData.doctorInviteCode}
                     onChange={(e) => handleInputChange('doctorInviteCode', e.target.value)}
                   />
