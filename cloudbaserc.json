@@ -1,6 +1,7 @@
 {
   "$schema": "https://framework-1258016615.tcloudbaseapp.com/schema/latest.json",
   "version": "2.0",
+  "envId": "pon-9guy3vvr42152b3d",
   "framework": {
     "name": "doctor-platform",
     "plugins": {
