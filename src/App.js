@@ -150,6 +150,44 @@ ${renderScaleLines(form.nutrition.scale, SCALE_OPTIONS.nrs)}`;
 
 const cloneAssessmentForm = (form) => JSON.parse(JSON.stringify(form));
 
+const normalizePhone = (value = '') => value.trim().replace(/\s+/g, '').replace(/-/g, '');
+
+const phoneToAuthEmail = (phone) => {
+  const normalized = normalizePhone(phone);
+  const localPart = normalized.replace(/[^0-9a-zA-Z]/g, '');
+  if (!localPart) {
+    throw new Error('请输入有效手机号');
+  }
+  return `${localPart}@phone.doctor-platform.local`;
+};
+
+const DEFAULT_SCHEDULE_FORM = {
+  scheduleDate: '',
+  startTime: '09:00',
+  endTime: '12:00',
+  capacity: 10,
+  note: ''
+};
+
+const buildAppBaseUrl = () => {
+  const configuredBindBaseUrl = (process.env.REACT_APP_BIND_BASE_URL || '').trim();
+  const appBasePath = (process.env.PUBLIC_URL || '').trim();
+
+  if (configuredBindBaseUrl) {
+    const configuredUrl = new URL(configuredBindBaseUrl);
+    if ((!configuredUrl.pathname || configuredUrl.pathname === '/') && appBasePath) {
+      configuredUrl.pathname = appBasePath.startsWith('/') ? appBasePath : `/${appBasePath}`;
+    }
+    configuredUrl.hash = '';
+    return configuredUrl;
+  }
+
+  const fallbackUrl = new URL(window.location.href);
+  fallbackUrl.search = '';
+  fallbackUrl.hash = '';
+  return fallbackUrl;
+};
+
 function App() {
   // ================= 状态管理 =================
   const [session, setSession] = useState(null);
@@ -161,11 +199,9 @@ function App() {
 
   // 表单状态
   const [formData, setFormData] = useState({
-    email: '',
     password: '',
     name: '',
     phone: '',
-    doctorInviteCode: '',
     role: 'patient'
   });
 
@@ -180,12 +216,13 @@ function App() {
   const [editingSavedAssessmentId, setEditingSavedAssessmentId] = useState(null);
   const [savedAssessments, setSavedAssessments] = useState([]);
   const [savedAssignPatientMap, setSavedAssignPatientMap] = useState({});
+  const [doctorReferralId, setDoctorReferralId] = useState('');
+  const [permanentDoctorQrUrl, setPermanentDoctorQrUrl] = useState('');
+  const [doctorSchedules, setDoctorSchedules] = useState([]);
+  const [patientSchedules, setPatientSchedules] = useState([]);
+  const [scheduleRegistrations, setScheduleRegistrations] = useState([]);
+  const [scheduleForm, setScheduleForm] = useState(DEFAULT_SCHEDULE_FORM);
   const [message, setMessage] = useState({ type: '', text: '' });
-
-  // 二维码相关
-  const [qrToken, setQrToken] = useState('');
-  const [qrExpiry, setQrExpiry] = useState('');
-  const [qrCodeUrl, setQrCodeUrl] = useState('');
 
   // ================= 监听认证状态 =================
   useEffect(() => {
@@ -215,38 +252,18 @@ function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // ================= 监听 URL 参数（扫码绑定） =================
+  // ================= 监听 URL 参数（扫码医生永久二维码） =================
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    if (token) {
-      setQrToken(token);
+    const doctor = params.get('doctor');
+    if (doctor) {
+      setDoctorReferralId(doctor);
+      setCurrentView('register');
+      setFormData((prev) => ({ ...prev, role: 'patient' }));
+      setMessage({ type: 'info', text: '已通过医生永久二维码进入，注册后将自动关联该医生。' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (!qrToken) return;
-
-    if (!session) {
-      setCurrentView('login');
-      setMessage({ type: 'info', text: '🔗 检测到患者绑定请求，请使用医生账号登录完成绑定' });
-      return;
-    }
-
-    if (userRole === 'doctor') {
-      // 医生已登录，直接进入绑定页面
-      setCurrentView('bind');
-      return;
-    }
-
-    if (userRole === 'patient') {
-      setCurrentView('dashboard');
-      setMessage({ type: 'error', text: '当前登录的是患者账号，请使用医生账号扫码绑定。' });
-      setQrToken(''); // 清除token
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
-  }, [qrToken, session, userRole]);
 
   // ================= 获取用户资料 =================
   const fetchUserProfile = async (userId) => {
@@ -263,6 +280,10 @@ function App() {
         setUserProfile(doctor);
         await fetchPatients();
         await fetchSavedAssessments(userId);
+        await fetchDoctorSchedules(userId);
+        const doctorUrl = buildAppBaseUrl();
+        doctorUrl.searchParams.set('doctor', userId);
+        setPermanentDoctorQrUrl(doctorUrl.toString());
         return;
       }
 
@@ -279,8 +300,11 @@ function App() {
         if (patient.doctor_id) {
           const doctor = await fetchDoctorInfo(patient.doctor_id);
           setDoctorProfile(doctor);
+          await fetchPatientSchedules(patient.doctor_id, userId);
         } else {
           setDoctorProfile(null);
+          setPatientSchedules([]);
+          setScheduleRegistrations([]);
         }
         await fetchSubmissions(userId);
         return;
@@ -385,6 +409,109 @@ function App() {
       console.error('获取评估草稿失败:', error);
       setMessage({ type: 'error', text: '获取评估保存列表失败：' + error.message });
       setSavedAssessments([]);
+    }
+  };
+
+  const fetchDoctorSchedules = async (doctorId) => {
+    if (!doctorId) {
+      setDoctorSchedules([]);
+      return;
+    }
+
+    try {
+      const { data: schedules, error: schedulesError } = await supabase
+        .from('doctor_schedules')
+        .select('*')
+        .eq('doctor_id', doctorId)
+        .order('schedule_date', { ascending: true })
+        .order('start_time', { ascending: true });
+
+      if (schedulesError) {
+        if (schedulesError.code === '42P01') {
+          setMessage({ type: 'error', text: '排班表尚未创建，请先执行 sql/schedules.sql。' });
+          setDoctorSchedules([]);
+          return;
+        }
+        throw schedulesError;
+      }
+
+      const scheduleIds = (schedules || []).map((item) => item.id);
+      let registrations = [];
+
+      if (scheduleIds.length > 0) {
+        const { data: regData, error: regError } = await supabase
+          .from('schedule_registrations')
+          .select('id,schedule_id,patient_id,created_at')
+          .in('schedule_id', scheduleIds);
+
+        if (regError && regError.code !== '42P01') throw regError;
+        registrations = regData || [];
+      }
+
+      const regCountMap = registrations.reduce((acc, item) => {
+        acc[item.schedule_id] = (acc[item.schedule_id] || 0) + 1;
+        return acc;
+      }, {});
+
+      setDoctorSchedules((schedules || []).map((item) => ({
+        ...item,
+        registered_count: regCountMap[item.id] || 0
+      })));
+    } catch (error) {
+      setMessage({ type: 'error', text: '获取排班失败：' + error.message });
+    }
+  };
+
+  const fetchPatientSchedules = async (doctorId, patientId) => {
+    if (!doctorId) {
+      setPatientSchedules([]);
+      setScheduleRegistrations([]);
+      return;
+    }
+
+    try {
+      const { data: schedules, error: schedulesError } = await supabase
+        .from('doctor_schedules')
+        .select('*')
+        .eq('doctor_id', doctorId)
+        .order('schedule_date', { ascending: true })
+        .order('start_time', { ascending: true });
+
+      if (schedulesError) {
+        if (schedulesError.code === '42P01') {
+          setMessage({ type: 'error', text: '排班表尚未创建，请先执行 sql/schedules.sql。' });
+          setPatientSchedules([]);
+          setScheduleRegistrations([]);
+          return;
+        }
+        throw schedulesError;
+      }
+
+      const scheduleIds = (schedules || []).map((item) => item.id);
+      let registrations = [];
+
+      if (scheduleIds.length > 0) {
+        const { data: regData, error: regError } = await supabase
+          .from('schedule_registrations')
+          .select('id,schedule_id,patient_id,created_at')
+          .in('schedule_id', scheduleIds);
+
+        if (regError && regError.code !== '42P01') throw regError;
+        registrations = regData || [];
+      }
+
+      const regCountMap = registrations.reduce((acc, item) => {
+        acc[item.schedule_id] = (acc[item.schedule_id] || 0) + 1;
+        return acc;
+      }, {});
+
+      setPatientSchedules((schedules || []).map((item) => ({
+        ...item,
+        registered_count: regCountMap[item.id] || 0
+      })));
+      setScheduleRegistrations(registrations.filter((item) => item.patient_id === patientId));
+    } catch (error) {
+      setMessage({ type: 'error', text: '获取医生排班失败：' + error.message });
     }
   };
 
@@ -586,6 +713,131 @@ function App() {
     }
   };
 
+  const handleScheduleFormChange = (field, value) => {
+    setScheduleForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleCreateSchedule = async (e) => {
+    e.preventDefault();
+
+    if (!scheduleForm.scheduleDate || !scheduleForm.startTime || !scheduleForm.endTime) {
+      setMessage({ type: 'error', text: '请完整填写排班日期与时间。' });
+      return;
+    }
+    if (scheduleForm.startTime >= scheduleForm.endTime) {
+      setMessage({ type: 'error', text: '结束时间必须晚于开始时间。' });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from('doctor_schedules')
+        .insert([{
+          doctor_id: session.user.id,
+          schedule_date: scheduleForm.scheduleDate,
+          start_time: scheduleForm.startTime,
+          end_time: scheduleForm.endTime,
+          capacity: Number(scheduleForm.capacity) || 10,
+          note: scheduleForm.note || ''
+        }]);
+
+      if (error) throw error;
+
+      setScheduleForm(DEFAULT_SCHEDULE_FORM);
+      await fetchDoctorSchedules(session.user.id);
+      setMessage({ type: 'success', text: '排班创建成功。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: '创建排班失败：' + error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegisterSchedule = async (scheduleId) => {
+    const schedule = patientSchedules.find((item) => item.id === scheduleId);
+    if (!schedule) {
+      setMessage({ type: 'error', text: '排班不存在。' });
+      return;
+    }
+
+    const alreadyRegistered = scheduleRegistrations.some((item) => item.schedule_id === scheduleId);
+    if (alreadyRegistered) {
+      setMessage({ type: 'info', text: '您已登记该排班。' });
+      return;
+    }
+
+    if ((schedule.registered_count || 0) >= schedule.capacity) {
+      setMessage({ type: 'error', text: '该排班号源已满。' });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from('schedule_registrations')
+        .insert([{
+          schedule_id: scheduleId,
+          patient_id: session.user.id
+        }]);
+
+      if (error) throw error;
+
+      await fetchPatientSchedules(userProfile?.doctor_id, session.user.id);
+      setMessage({ type: 'success', text: '排班登记成功。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: '登记失败：' + error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteSchedule = async (scheduleId) => {
+    const confirmed = window.confirm('确认删除该排班吗？删除后相关预约也会一并移除。');
+    if (!confirmed) return;
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from('doctor_schedules')
+        .delete()
+        .eq('id', scheduleId)
+        .eq('doctor_id', session.user.id);
+
+      if (error) throw error;
+
+      await fetchDoctorSchedules(session.user.id);
+      setMessage({ type: 'success', text: '排班已删除。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: '删除排班失败：' + error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancelScheduleRegistration = async (scheduleId) => {
+    const confirmed = window.confirm('确认取消该预约吗？');
+    if (!confirmed) return;
+
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from('schedule_registrations')
+        .delete()
+        .eq('schedule_id', scheduleId)
+        .eq('patient_id', session.user.id);
+
+      if (error) throw error;
+
+      await fetchPatientSchedules(userProfile?.doctor_id, session.user.id);
+      setMessage({ type: 'success', text: '预约已取消。' });
+    } catch (error) {
+      setMessage({ type: 'error', text: '取消预约失败：' + error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleAssignSavedAssessment = async (savedId) => {
     const savedItem = savedAssessments.find((item) => item.id === savedId);
     if (!savedItem) {
@@ -641,13 +893,19 @@ function App() {
     setMessage({ type: '', text: '' });
 
     try {
+      if (doctorReferralId && formData.role !== 'patient') {
+        throw new Error('通过医生二维码进入时，请选择“患者”身份注册。');
+      }
+
+      const authEmail = phoneToAuthEmail(formData.phone);
+
       const { data, error } = await supabase.auth.signUp({
-        email: formData.email,
+        email: authEmail,
         password: formData.password,
         options: {
           data: {
             name: formData.name,
-            phone: formData.phone,
+            phone: normalizePhone(formData.phone),
             role: formData.role
           }
         }
@@ -663,7 +921,7 @@ function App() {
             .insert([{
               id: data.user.id,
               name: formData.name,
-              phone: formData.phone
+              phone: normalizePhone(formData.phone)
             }]);
 
           if (doctorInsertError) throw doctorInsertError;
@@ -671,17 +929,17 @@ function App() {
           // 创建患者记录
           let doctorId = null;
 
-          // 如果患者提供了医生邀请码，验证并绑定医生
-          if (formData.doctorInviteCode) {
-            const { data: doctor, error: doctorError } = await supabase
+          if (doctorReferralId) {
+            const { data: doctorByQr, error: doctorByQrError } = await supabase
               .from('doctors')
               .select('id')
-              .or(`phone.eq.${formData.doctorInviteCode},name.eq.${formData.doctorInviteCode}`)
+              .eq('id', doctorReferralId)
               .maybeSingle();
 
-            if (doctorError) throw new Error('查找医生失败：' + doctorError.message);
-            if (!doctor) throw new Error('邀请码无效，找不到对应医生（可填写医生手机号或姓名）');
-            doctorId = doctor.id;
+            if (doctorByQrError) throw new Error('通过二维码关联医生失败：' + doctorByQrError.message);
+            if (doctorByQr) {
+              doctorId = doctorByQr.id;
+            }
           }
 
           const { error: patientInsertError } = await supabase
@@ -689,14 +947,21 @@ function App() {
             .insert([{
               id: data.user.id,
               name: formData.name,
-              phone: formData.phone,
+              phone: normalizePhone(formData.phone),
               doctor_id: doctorId
             }]);
 
           if (patientInsertError) throw patientInsertError;
         }
 
-        setMessage({ type: 'success', text: '注册成功！请检查邮箱确认链接后登录。' });
+        if (data.session) {
+          setSession(data.session);
+          await fetchUserProfile(data.user.id);
+          setCurrentView('dashboard');
+          setMessage({ type: 'success', text: '注册成功并已登录！' });
+        } else {
+          setMessage({ type: 'success', text: '注册成功！请完成账号确认后登录。' });
+        }
       }
     } catch (error) {
       setMessage({ type: 'error', text: error.message });
@@ -712,12 +977,18 @@ function App() {
     setMessage({ type: '', text: '' });
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: formData.email,
+      const authEmail = phoneToAuthEmail(formData.phone);
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
         password: formData.password
       });
 
       if (error) throw error;
+      if (data?.session && data?.user) {
+        setSession(data.session);
+        await fetchUserProfile(data.user.id);
+        setCurrentView('dashboard');
+      }
       setMessage({ type: 'success', text: '登录成功！' });
     } catch (error) {
       setMessage({ type: 'error', text: '登录失败：' + error.message });
@@ -738,13 +1009,17 @@ function App() {
       setSavedAssessments([]);
       setSavedAssignPatientMap({});
       setEditingSavedAssessmentId(null);
+      setDoctorReferralId('');
+      setPermanentDoctorQrUrl('');
+      setDoctorSchedules([]);
+      setPatientSchedules([]);
+      setScheduleRegistrations([]);
+      setScheduleForm(DEFAULT_SCHEDULE_FORM);
       setCurrentView('dashboard');
       setFormData({
-        email: '',
         password: '',
         name: '',
         phone: '',
-        doctorInviteCode: '',
         role: 'patient'
       });
       window.history.replaceState({}, document.title, '/');
@@ -780,113 +1055,6 @@ function App() {
     }
   };
 
-  // ================= 生成绑定二维码 =================
-  const generateBindingQr = async () => {
-    setLoading(true);
-    try {
-      const token = crypto.randomUUID();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10分钟后过期
-
-      const { error } = await supabase
-        .from('binding_requests')
-        .insert([{
-          token,
-          patient_id: session.user.id,
-          expires_at: expiresAt.toISOString(),
-          used: false
-        }]);
-
-      if (error) throw error;
-
-      // 优先使用固定配置地址，避免同环境多应用时跳错站点
-      const configuredBindBaseUrl = (process.env.REACT_APP_BIND_BASE_URL || '').trim();
-      const appBasePath = (process.env.PUBLIC_URL || '').trim();
-      let bindUrl;
-
-      if (configuredBindBaseUrl) {
-        bindUrl = new URL(configuredBindBaseUrl);
-        // 若仅配置了域名根路径，自动补齐当前应用子路径（如 /doctor-platform）
-        if ((!bindUrl.pathname || bindUrl.pathname === '/') && appBasePath) {
-          bindUrl.pathname = appBasePath.startsWith('/') ? appBasePath : `/${appBasePath}`;
-        }
-      } else {
-        // 回退到当前页面地址，确保与当前应用保持一致
-        bindUrl = new URL(window.location.href);
-      }
-
-      bindUrl.searchParams.set('token', token);
-      bindUrl.hash = '';
-      const qrContent = bindUrl.toString();
-      setQrToken(token);
-      setQrExpiry(expiresAt.toLocaleString('zh-CN'));
-      setQrCodeUrl(qrContent);
-      setMessage({ type: 'success', text: '二维码生成成功！医生扫码后需先登录医生账号。' });
-    } catch (error) {
-      setMessage({ type: 'error', text: '生成二维码失败：' + error.message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ================= 医生扫码后确认绑定 =================
-  const handleBindByToken = async () => {
-    if (!session || userRole !== 'doctor') {
-      setMessage({ type: 'error', text: '只有医生可以执行绑定操作' });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      // 查找有效的绑定请求
-      const { data: request, error } = await supabase
-        .from('binding_requests')
-        .select('*')
-        .eq('token', qrToken)
-        .eq('used', false)
-        .gt('expires_at', new Date().toISOString())
-        .single();
-
-      if (error || !request) {
-        throw new Error('二维码无效或已过期');
-      }
-
-      // 更新患者绑定的医生
-      const { data: patientRecord, error: patientError } = await supabase
-        .from('patients')
-        .select('id,doctor_id')
-        .eq('id', request.patient_id)
-        .single();
-
-      if (patientError || !patientRecord) {
-        throw new Error('患者记录不存在，无法完成绑定');
-      }
-
-      if (patientRecord.doctor_id && patientRecord.doctor_id !== session.user.id) {
-        throw new Error('该患者已绑定其他医生，请先解绑后再重新绑定');
-      }
-
-      const { error: updateError } = await supabase
-        .from('patients')
-        .update({ doctor_id: session.user.id })
-        .eq('id', request.patient_id);
-
-      if (updateError) throw updateError;
-
-      // 标记绑定请求为已使用
-      await supabase
-        .from('binding_requests')
-        .update({ used: true })
-        .eq('token', qrToken);
-
-      setMessage({ type: 'success', text: '患者绑定成功！' });
-      await fetchPatients();
-      setCurrentView('dashboard');
-    } catch (error) {
-      setMessage({ type: 'error', text: error.message });
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // ================= 表单输入处理 =================
   const handleInputChange = (field, value) => {
@@ -934,6 +1102,13 @@ function App() {
             <form className="auth-form" onSubmit={handleSignUp}>
               <h2>创建账户</h2>
 
+              {doctorReferralId && (
+                <div className="bind-notice">
+                  <p>📌 当前来自医生永久二维码</p>
+                  <p>注册为<strong>患者</strong>后将自动与该医生关联</p>
+                </div>
+              )}
+
               <div className="form-group">
                 <label>身份类型</label>
                 <select
@@ -947,23 +1122,12 @@ function App() {
               </div>
 
               <div className="form-group">
-                <label>邮箱</label>
+                <label>手机号</label>
                 <input
-                  type="email"
-                  placeholder="请输入邮箱"
-                  value={formData.email}
-                  onChange={(e) => handleInputChange('email', e.target.value)}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label>密码</label>
-                <input
-                  type="password"
-                  placeholder="请输入密码"
-                  value={formData.password}
-                  onChange={(e) => handleInputChange('password', e.target.value)}
+                  type="tel"
+                  placeholder="请输入手机号"
+                  value={formData.phone}
+                  onChange={(e) => handleInputChange('phone', e.target.value)}
                   required
                 />
               </div>
@@ -980,27 +1144,15 @@ function App() {
               </div>
 
               <div className="form-group">
-                <label>手机号</label>
+                <label>密码</label>
                 <input
-                  type="tel"
-                  placeholder="请输入手机号"
-                  value={formData.phone}
-                  onChange={(e) => handleInputChange('phone', e.target.value)}
+                  type="password"
+                  placeholder="请输入密码"
+                  value={formData.password}
+                  onChange={(e) => handleInputChange('password', e.target.value)}
                   required
                 />
               </div>
-
-              {formData.role === 'patient' && (
-                <div className="form-group">
-                  <label>医生邀请码（医生手机号/姓名，可选）</label>
-                  <input
-                    type="text"
-                    placeholder="请输入医生手机号或姓名"
-                    value={formData.doctorInviteCode}
-                    onChange={(e) => handleInputChange('doctorInviteCode', e.target.value)}
-                  />
-                </div>
-              )}
 
               <button type="submit" className="auth-button" disabled={loading}>
                 {loading ? '注册中...' : '注册'}
@@ -1012,20 +1164,13 @@ function App() {
             <form className="auth-form" onSubmit={handleSignIn}>
               <h2>登录账户</h2>
 
-              {qrToken && (
-                <div className="bind-notice">
-                  <p>🔗 您正在完成患者绑定</p>
-                  <p>请使用<strong>医生账号</strong>登录以完成绑定</p>
-                </div>
-              )}
-
               <div className="form-group">
-                <label>邮箱</label>
+                <label>手机号</label>
                 <input
-                  type="email"
-                  placeholder="请输入邮箱"
-                  value={formData.email}
-                  onChange={(e) => handleInputChange('email', e.target.value)}
+                  type="tel"
+                  placeholder="请输入手机号"
+                  value={formData.phone}
+                  onChange={(e) => handleInputChange('phone', e.target.value)}
                   required
                 />
               </div>
@@ -1042,55 +1187,10 @@ function App() {
               </div>
 
               <button type="submit" className="auth-button" disabled={loading}>
-                {loading ? '登录中...' : qrToken ? '登录并绑定' : '登录'}
+                {loading ? '登录中...' : '登录'}
               </button>
             </form>
           )}
-
-          {message.text && (
-            <div className={`message ${message.type}`}>
-              {message.text}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ================= 绑定页面 =================
-  if (currentView === 'bind') {
-    return (
-      <div className="app">
-        <div className="bind-container">
-          <h2>确认绑定患者</h2>
-          <p>您即将绑定一位患者，绑定后可以查看该患者信息并进行沟通</p>
-
-          <div className="bind-info">
-            <div className="info-item">
-              <span className="label">绑定令牌：</span>
-              <span className="value">{qrToken}</span>
-            </div>
-            <div className="info-item">
-              <span className="label">当前医生：</span>
-              <span className="value">{userProfile?.name || session?.user?.email}</span>
-            </div>
-          </div>
-
-          <div className="bind-actions">
-            <button onClick={handleBindByToken} className="bind-button" disabled={loading}>
-              {loading ? '绑定中...' : '确认绑定此患者'}
-            </button>
-            <button 
-              onClick={() => {
-                setCurrentView('dashboard');
-                setQrToken('');
-                window.history.replaceState({}, document.title, window.location.pathname);
-              }} 
-              className="cancel-button"
-            >
-              取消
-            </button>
-          </div>
 
           {message.text && (
             <div className={`message ${message.type}`}>
@@ -1141,6 +1241,14 @@ function App() {
             评估列表
           </button>
         )}
+        {userRole === 'doctor' && (
+          <button
+            className={`nav-button ${currentView === 'scheduleManage' ? 'active' : ''}`}
+            onClick={() => setCurrentView('scheduleManage')}
+          >
+            排班管理
+          </button>
+        )}
         {userRole === 'patient' && (
           <button
             className={`nav-button ${currentView === 'chat' ? 'active' : ''}`}
@@ -1156,6 +1264,20 @@ function App() {
             onClick={() => setCurrentView('patientAssessments')}
           >
             医生评估表
+          </button>
+        )}
+        {userRole === 'patient' && (
+          <button
+            className={`nav-button ${currentView === 'scheduleBrowse' ? 'active' : ''}`}
+            onClick={() => {
+              setCurrentView('scheduleBrowse');
+              if (userProfile?.doctor_id) {
+                fetchPatientSchedules(userProfile.doctor_id, session.user.id);
+              }
+            }}
+            disabled={!userProfile?.doctor_id}
+          >
+            医生排班
           </button>
         )}
         {selectedPatient && (
@@ -1189,6 +1311,18 @@ function App() {
                 <p className="stat-number">0</p>
               </div>
             </div>
+
+            <div className="qr-display doctor-permanent-qr">
+              <h3>患者注册永久二维码</h3>
+              {permanentDoctorQrUrl ? (
+                <>
+                  <QRCode value={permanentDoctorQrUrl} size={200} />
+                  <p>患者微信扫码后可注册并自动关联您</p>
+                </>
+              ) : (
+                <p>二维码生成中...</p>
+              )}
+            </div>
           </div>
         )}
 
@@ -1210,18 +1344,18 @@ function App() {
               <button onClick={() => setCurrentView('symptoms')} className="action-button">
                 记录症状
               </button>
-              <button onClick={generateBindingQr} className="action-button">
-                {userProfile?.doctor_id ? '重新绑定医生' : '绑定医生'}
-              </button>
+              {userProfile?.doctor_id && (
+                <button
+                  onClick={async () => {
+                    await fetchPatientSchedules(userProfile.doctor_id, session.user.id);
+                    setCurrentView('scheduleBrowse');
+                  }}
+                  className="action-button"
+                >
+                  查看医生排班
+                </button>
+              )}
             </div>
-
-            {qrCodeUrl && (
-              <div className="qr-display">
-                <h3>绑定医生二维码</h3>
-                <QRCode value={qrCodeUrl} size={200} />
-                <p>有效期至：{qrExpiry}</p>
-              </div>
-            )}
           </div>
         )}
 
@@ -1258,6 +1392,92 @@ function App() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* 医生排班管理 */}
+        {userRole === 'doctor' && currentView === 'scheduleManage' && (
+          <div className="schedule-section">
+            <h2>排班管理</h2>
+
+            <form className="schedule-form" onSubmit={handleCreateSchedule}>
+              <div className="schedule-form-grid">
+                <div className="form-group">
+                  <label>日期</label>
+                  <input
+                    type="date"
+                    value={scheduleForm.scheduleDate}
+                    onChange={(e) => handleScheduleFormChange('scheduleDate', e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>开始时间</label>
+                  <input
+                    type="time"
+                    value={scheduleForm.startTime}
+                    onChange={(e) => handleScheduleFormChange('startTime', e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>结束时间</label>
+                  <input
+                    type="time"
+                    value={scheduleForm.endTime}
+                    onChange={(e) => handleScheduleFormChange('endTime', e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>号源数量</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={scheduleForm.capacity}
+                    onChange={(e) => handleScheduleFormChange('capacity', e.target.value)}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>备注</label>
+                <input
+                  type="text"
+                  placeholder="可选，例如：仅复诊"
+                  value={scheduleForm.note}
+                  onChange={(e) => handleScheduleFormChange('note', e.target.value)}
+                />
+              </div>
+
+              <button type="submit" className="submit-button" disabled={loading}>
+                {loading ? '创建中...' : '新增排班'}
+              </button>
+            </form>
+
+            <div className="schedule-list">
+              {doctorSchedules.length === 0 ? (
+                <div className="empty-state">
+                  <p>暂无排班</p>
+                </div>
+              ) : doctorSchedules.map((item) => (
+                <div key={item.id} className="schedule-card">
+                  <h3>{item.schedule_date} {item.start_time}-{item.end_time}</h3>
+                  <p>已登记：{item.registered_count || 0} / {item.capacity}</p>
+                  {item.note && <p>备注：{item.note}</p>}
+                  <div className="schedule-card-actions">
+                    <button
+                      className="delete-button"
+                      onClick={() => handleDeleteSchedule(item.id)}
+                      disabled={loading}
+                    >
+                      删除排班
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -1778,6 +1998,53 @@ function App() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* 患者查看并登记医生排班 */}
+        {userRole === 'patient' && currentView === 'scheduleBrowse' && (
+          <div className="schedule-section">
+            <h2>医生排班表</h2>
+            {!userProfile?.doctor_id ? (
+              <div className="empty-state">
+                <p>请先绑定医生</p>
+              </div>
+            ) : patientSchedules.length === 0 ? (
+              <div className="empty-state">
+                <p>该医生暂无排班</p>
+              </div>
+            ) : (
+              <div className="schedule-list">
+                {patientSchedules.map((item) => {
+                  const alreadyRegistered = scheduleRegistrations.some((reg) => reg.schedule_id === item.id);
+                  const isFull = (item.registered_count || 0) >= item.capacity;
+
+                  return (
+                    <div key={item.id} className="schedule-card">
+                      <h3>{item.schedule_date} {item.start_time}-{item.end_time}</h3>
+                      <p>已登记：{item.registered_count || 0} / {item.capacity}</p>
+                      {item.note && <p>备注：{item.note}</p>}
+                      <button
+                        className="action-button"
+                        onClick={() => handleRegisterSchedule(item.id)}
+                        disabled={alreadyRegistered || isFull || loading}
+                      >
+                        {alreadyRegistered ? '已登记' : isFull ? '已满' : (loading ? '登记中...' : '登记就诊')}
+                      </button>
+                      {alreadyRegistered && (
+                        <button
+                          className="delete-button"
+                          onClick={() => handleCancelScheduleRegistration(item.id)}
+                          disabled={loading}
+                        >
+                          取消预约
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
