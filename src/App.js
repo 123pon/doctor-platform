@@ -188,13 +188,17 @@ const buildAppBaseUrl = () => {
   return fallbackUrl;
 };
 
+const normalizeUuid = (value = '') => value.trim().toLowerCase();
+const isUuid = (value = '') => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim());
+
 function App() {
   // ================= 状态管理 =================
   const [session, setSession] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [doctorProfile, setDoctorProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [initializing, setInitializing] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [currentView, setCurrentView] = useState('dashboard');
 
   // 表单状态
@@ -224,6 +228,56 @@ function App() {
   const [scheduleForm, setScheduleForm] = useState(DEFAULT_SCHEDULE_FORM);
   const [message, setMessage] = useState({ type: '', text: '' });
 
+  const applyDoctorReferralForPatient = async (userId, fallbackProfile = {}) => {
+    const referralDoctorId = normalizeUuid(doctorReferralId);
+    if (!referralDoctorId || !isUuid(referralDoctorId)) {
+      return { changed: false, status: 'skipped' };
+    }
+
+    const fallbackName = (fallbackProfile.name || '').trim() || '未命名患者';
+    const fallbackPhone = normalizePhone(fallbackProfile.phone || '');
+
+    const { data: existingPatient, error: patientQueryError } = await supabase
+      .from('patients')
+      .select('id,doctor_id')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (patientQueryError) {
+      throw patientQueryError;
+    }
+
+    if (!existingPatient) {
+      const { error: insertError } = await supabase
+        .from('patients')
+        .insert([{
+          id: userId,
+          name: fallbackName,
+          phone: fallbackPhone,
+          doctor_id: referralDoctorId
+        }]);
+
+      if (insertError) throw insertError;
+      return { changed: true, status: 'inserted' };
+    }
+
+    if (existingPatient.doctor_id === referralDoctorId) {
+      return { changed: false, status: 'already-bound' };
+    }
+
+    if (existingPatient.doctor_id) {
+      return { changed: false, status: 'bound-other' };
+    }
+
+    const { error: updateError } = await supabase
+      .from('patients')
+      .update({ doctor_id: referralDoctorId })
+      .eq('id', userId);
+
+    if (updateError) throw updateError;
+    return { changed: true, status: 'updated' };
+  };
+
   // ================= 监听认证状态 =================
   useEffect(() => {
     const initializeAuth = async () => {
@@ -232,7 +286,7 @@ function App() {
       if (session) {
         await fetchUserProfile(session.user.id);
       }
-      setLoading(false);
+      setInitializing(false);
     };
 
     initializeAuth();
@@ -246,11 +300,43 @@ function App() {
         setUserProfile(null);
         setCurrentView('dashboard');
       }
-      setLoading(false);
+      setInitializing(false);
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const bindDoctorForLoggedPatient = async () => {
+      if (!session?.user?.id || !doctorReferralId) return;
+      if (userRole !== 'patient') return;
+      if (userProfile?.doctor_id) return;
+
+      try {
+        setLoading(true);
+        const referralResult = await applyDoctorReferralForPatient(session.user.id, {
+          name: userProfile?.name || formData.name,
+          phone: userProfile?.phone || formData.phone
+        });
+
+        if (referralResult.status === 'bound-other') {
+          setMessage({ type: 'info', text: '当前账号已绑定其他医生，未自动覆盖绑定关系。' });
+          return;
+        }
+
+        if (referralResult.changed) {
+          await fetchUserProfile(session.user.id);
+          setMessage({ type: 'success', text: '已根据二维码自动关联医生。' });
+        }
+      } catch (error) {
+        setMessage({ type: 'error', text: '二维码自动关联失败：' + error.message });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    bindDoctorForLoggedPatient();
+  }, [doctorReferralId, session?.user?.id, userRole, userProfile?.doctor_id]);
 
   // ================= 监听 URL 参数（扫码医生永久二维码） =================
   useEffect(() => {
@@ -930,16 +1016,11 @@ function App() {
           let doctorId = null;
 
           if (doctorReferralId) {
-            const { data: doctorByQr, error: doctorByQrError } = await supabase
-              .from('doctors')
-              .select('id')
-              .eq('id', doctorReferralId)
-              .maybeSingle();
-
-            if (doctorByQrError) throw new Error('通过二维码关联医生失败：' + doctorByQrError.message);
-            if (doctorByQr) {
-              doctorId = doctorByQr.id;
+            const normalizedDoctorId = normalizeUuid(doctorReferralId);
+            if (!isUuid(normalizedDoctorId)) {
+              throw new Error('二维码医生参数无效，请让医生重新生成二维码。');
             }
+            doctorId = normalizedDoctorId;
           }
 
           const { error: patientInsertError } = await supabase
@@ -985,11 +1066,24 @@ function App() {
 
       if (error) throw error;
       if (data?.session && data?.user) {
+        if (doctorReferralId) {
+          const referralResult = await applyDoctorReferralForPatient(data.user.id, {
+            name: data.user.user_metadata?.name || formData.name,
+            phone: data.user.user_metadata?.phone || formData.phone
+          });
+          if (referralResult.status === 'bound-other') {
+            setMessage({ type: 'info', text: '当前账号已绑定其他医生，未自动覆盖绑定关系。' });
+          } else if (referralResult.changed) {
+            setMessage({ type: 'success', text: '已根据二维码自动关联医生。' });
+          }
+        }
         setSession(data.session);
         await fetchUserProfile(data.user.id);
         setCurrentView('dashboard');
       }
-      setMessage({ type: 'success', text: '登录成功！' });
+      if (!doctorReferralId) {
+        setMessage({ type: 'success', text: '登录成功！' });
+      }
     } catch (error) {
       setMessage({ type: 'error', text: '登录失败：' + error.message });
     } finally {
@@ -1062,7 +1156,7 @@ function App() {
   };
 
   // ================= 加载状态 =================
-  if (loading) {
+  if (initializing) {
     return (
       <div className="app">
         <div className="loading-container">

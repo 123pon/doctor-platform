@@ -28,6 +28,24 @@ $$;
 revoke all on function public.is_bound_pair(uuid, uuid) from public;
 grant execute on function public.is_bound_pair(uuid, uuid) to authenticated;
 
+-- helper: check doctor existence without being blocked by doctors table RLS
+create or replace function public.doctor_exists(doctor_uuid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.doctors d
+    where d.id = doctor_uuid
+  );
+$$;
+
+revoke all on function public.doctor_exists(uuid) from public;
+grant execute on function public.doctor_exists(uuid) to authenticated;
+
 -- 3) doctors policies
 -- doctor can read self profile
  drop policy if exists doctors_select_self on public.doctors;
@@ -46,6 +64,14 @@ to authenticated
 using (id = auth.uid())
 with check (id = auth.uid());
 
+-- doctor can insert self profile
+ drop policy if exists doctors_insert_self on public.doctors;
+create policy doctors_insert_self
+on public.doctors
+for insert
+to authenticated
+with check (id = auth.uid());
+
 -- 4) patients policies
 -- patient can read self, doctor can read own patients
  drop policy if exists patients_select_self_or_doctor on public.patients;
@@ -57,7 +83,18 @@ using (
   id = auth.uid() or doctor_id = auth.uid()
 );
 
--- patient can update own basic profile; doctor_id must not be changed by patient
+-- patient can insert self profile (doctor_id optional, but if set must exist)
+ drop policy if exists patients_insert_self on public.patients;
+create policy patients_insert_self
+on public.patients
+for insert
+to authenticated
+with check (
+  id = auth.uid()
+  and (doctor_id is null or public.doctor_exists(doctor_id))
+);
+
+-- patient can update own basic profile, and can bind doctor once if currently unbound
  drop policy if exists patients_update_self on public.patients;
 create policy patients_update_self
 on public.patients
@@ -66,10 +103,21 @@ to authenticated
 using (id = auth.uid())
 with check (
   id = auth.uid()
-  and doctor_id is not distinct from (
-    select p.doctor_id
-    from public.patients p
-    where p.id = auth.uid()
+  and (
+    doctor_id is not distinct from (
+      select p.doctor_id
+      from public.patients p
+      where p.id = auth.uid()
+    )
+    or (
+      (
+        select p.doctor_id
+        from public.patients p
+        where p.id = auth.uid()
+      ) is null
+      and doctor_id is not null
+      and public.doctor_exists(doctor_id)
+    )
   )
 );
 

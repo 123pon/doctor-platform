@@ -20,8 +20,10 @@ order by c.relname;
 -- =====================================================
 with expected as (
   select 'public'::text as schemaname, 'doctors'::text as tablename, 'doctors_select_self'::text as policyname union all
+  select 'public', 'doctors', 'doctors_insert_self' union all
   select 'public', 'doctors', 'doctors_update_self' union all
   select 'public', 'patients', 'patients_select_self_or_doctor' union all
+  select 'public', 'patients', 'patients_insert_self' union all
   select 'public', 'patients', 'patients_update_self' union all
   select 'public', 'patients', 'patients_update_bind_by_doctor' union all
   select 'public', 'binding_requests', 'binding_requests_insert_self' union all
